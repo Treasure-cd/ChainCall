@@ -3,7 +3,7 @@ from ..base.rpc_client import BaseRPCClient
 
 
 class SolanaRPCClient(BaseRPCClient):
-    DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com"
+    DEFAULT_RPC_URL = "https://api.devnet.solana.com"
 
     @classmethod
     def get_default_rpc_url(cls) -> str:
