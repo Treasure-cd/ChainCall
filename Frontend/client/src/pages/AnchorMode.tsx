@@ -431,6 +431,117 @@ function generateValueForArg(arg: IdlArg): string {
   return generateValueForType(typeName) || "";
 }
 
+const BIGINT_BYTE_LENGTH: Record<string, number> = {
+  u64: 8,
+  i64: 8,
+  u128: 16,
+  i128: 16,
+};
+
+function parseBigIntInput(raw: string | undefined, argName: string): bigint {
+  const normalized = (raw ?? "0").toString().trim();
+  if (!normalized) {
+    return 0n;
+  }
+
+  try {
+    return BigInt(normalized);
+  } catch (err) {
+    throw new Error(`[${argName}] Invalid integer value: ${raw}`);
+  }
+}
+
+function ensureBigIntRange(
+  value: bigint,
+  bits: number,
+  signed: boolean,
+  argName: string,
+  typeLabel: string
+): void {
+  const totalBits = BigInt(bits);
+
+  if (signed) {
+    const min = -(1n << (totalBits - 1n));
+    const max = (1n << (totalBits - 1n)) - 1n;
+    if (value < min || value > max) {
+      throw new Error(
+        `[${argName}] Value ${value.toString()} is out of range for ${typeLabel}`
+      );
+    }
+  } else {
+    if (value < 0n) {
+      throw new Error(`[${argName}] ${typeLabel} must be greater than or equal to 0`);
+    }
+    const max = (1n << totalBits) - 1n;
+    if (value > max) {
+      throw new Error(
+        `[${argName}] Value ${value.toString()} is out of range for ${typeLabel}`
+      );
+    }
+  }
+}
+
+function writeBigIntToBuffer(
+  buffer: Buffer,
+  rawValue: string | undefined,
+  offset: number,
+  typeName: string,
+  argName: string
+): number {
+  const byteLength = BIGINT_BYTE_LENGTH[typeName];
+  if (!byteLength) {
+    throw new Error(`Unsupported bigint type ${typeName}`);
+  }
+
+  const signed = typeName.startsWith("i");
+  const bits = byteLength * 8;
+  const value = parseBigIntInput(rawValue, argName);
+  ensureBigIntRange(value, bits, signed, argName, typeName);
+
+  let normalized = value;
+  if (signed && value < 0n) {
+    const mod = 1n << BigInt(bits);
+    normalized = mod + value;
+  }
+
+  for (let i = 0; i < byteLength; i++) {
+    buffer[offset + i] = Number(normalized & 0xffn);
+    normalized >>= 8n;
+  }
+
+  return byteLength;
+}
+
+function parseIntegerInput(raw: string | undefined, argName: string): number {
+  if (raw === undefined || raw === null || raw === "") {
+    return 0;
+  }
+
+  const num = Number(raw);
+  if (!Number.isFinite(num)) {
+    throw new Error(`[${argName}] Value must be a finite number`);
+  }
+  if (!Number.isInteger(num)) {
+    throw new Error(`[${argName}] Value must be an integer`);
+  }
+
+  return num;
+}
+
+function ensureNumberRange(
+  value: number,
+  bits: number,
+  signed: boolean,
+  argName: string,
+  typeLabel: string
+): void {
+  const min = signed ? -(2 ** (bits - 1)) : 0;
+  const max = signed ? 2 ** (bits - 1) - 1 : 2 ** bits - 1;
+  if (value < min || value > max) {
+    throw new Error(`[${argName}] Value ${value} is out of range for ${typeLabel}`);
+  }
+}
+
 export default function AnchorMode() {
   const [programId, setProgramId] = useState("");
   const [network, setNetwork] = useState("mainnet");
@@ -770,6 +881,30 @@ function ExecutorModal({
     }, [instruction]);
 
     useEffect(() => {
+      if (!instruction?.args?.length) {
+        return;
+      }
+
+      setArgValues((prev) => {
+        let changed = false;
+        const next = { ...prev };
+
+        instruction.args.forEach((arg) => {
+          const typeName = resolveArgType(arg.type).toLowerCase();
+          if (
+            (typeName === "pubkey" || typeName === "publickey") &&
+            !next[arg.name]
+          ) {
+            next[arg.name] = Keypair.generate().publicKey.toBase58();
+            changed = true;
+          }
+        });
+
+        return changed ? next : prev;
+      });
+    }, [instruction]);
+
+    useEffect(() => {
       if (!instruction?.accounts?.length) {
         return;
       }
@@ -858,51 +993,78 @@ function ExecutorModal({
             
             for (const arg of instruction.args) {
                 const value = argValues[arg.name];
+              const resolvedType = resolveArgType(arg.type);
+              const typeName = resolvedType.toLowerCase();
                 
-                let typeName = '';
-                if (typeof arg.type === 'string') {
-                    typeName = arg.type;
-                } else if (typeof arg.type === 'object' && arg.type !== null) {
-                    // Simple handling for complex types - just to identify them
-                    if ('defined' in arg.type) typeName = 'defined';
-                    else if ('vec' in arg.type) typeName = 'vec';
-                    else if ('option' in arg.type) typeName = 'option';
-                    else if ('array' in arg.type) typeName = 'array';
-                    else typeName = 'unknown';
-                }
-                
-                console.log(`Processing arg ${arg.name} of type`, arg.type, `(treated as ${typeName}) with value:`, value);
+              console.log(`Processing arg ${arg.name} of type`, resolvedType, `(interpreted as ${typeName}) with value:`, value);
 
-                if (typeName === 'u64' || typeName === 'u128' || typeName === 'i64' || typeName === 'i128') {
-                    const bn = BigInt(value || '0');
-                    if (typeName.startsWith('u')) argsBuffer.writeBigUInt64LE(bn, offset);
-                    else argsBuffer.writeBigInt64LE(bn, offset);
-                    offset += 8;
-                } else if (typeName === 'u32' || typeName === 'i32') {
-                    const val = parseInt(value || '0');
-                    if (typeName.startsWith('u')) argsBuffer.writeUInt32LE(val, offset);
-                    else argsBuffer.writeInt32LE(val, offset);
-                    offset += 4;
-                } else if (typeName === 'u16' || typeName === 'i16') {
-                    const val = parseInt(value || '0');
-                    if (typeName.startsWith('u')) argsBuffer.writeUInt16LE(val, offset);
-                    else argsBuffer.writeInt16LE(val, offset);
-                    offset += 2;
-                } else if (typeName === 'u8' || typeName === 'i8') {
-                    const val = parseInt(value || '0');
-                    if (typeName.startsWith('u')) argsBuffer.writeUInt8(val, offset);
-                    else argsBuffer.writeInt8(val, offset);
-                    offset += 1;
-                } else if (typeName === 'string') {
+              if (
+                typeName === 'u64' ||
+                typeName === 'u128' ||
+                typeName === 'i64' ||
+                typeName === 'i128'
+              ) {
+                const written = writeBigIntToBuffer(
+                  argsBuffer,
+                  value,
+                  offset,
+                  typeName,
+                  arg.name
+                );
+                offset += written;
+              } else if (typeName === 'u32' || typeName === 'i32') {
+                const val = parseIntegerInput(value, arg.name);
+                ensureNumberRange(
+                  val,
+                  32,
+                  typeName.startsWith('i'),
+                  arg.name,
+                  resolvedType
+                );
+                if (typeName.startsWith('u')) argsBuffer.writeUInt32LE(val, offset);
+                else argsBuffer.writeInt32LE(val, offset);
+                offset += 4;
+              } else if (typeName === 'u16' || typeName === 'i16') {
+                const val = parseIntegerInput(value, arg.name);
+                ensureNumberRange(
+                  val,
+                  16,
+                  typeName.startsWith('i'),
+                  arg.name,
+                  resolvedType
+                );
+                if (typeName.startsWith('u')) argsBuffer.writeUInt16LE(val, offset);
+                else argsBuffer.writeInt16LE(val, offset);
+                offset += 2;
+              } else if (typeName === 'u8' || typeName === 'i8') {
+                const val = parseIntegerInput(value, arg.name);
+                ensureNumberRange(
+                  val,
+                  8,
+                  typeName.startsWith('i'),
+                  arg.name,
+                  resolvedType
+                );
+                if (typeName.startsWith('u')) argsBuffer.writeUInt8(val, offset);
+                else argsBuffer.writeInt8(val, offset);
+                offset += 1;
+              } else if (typeName === 'string') {
                     const strBytes = Buffer.from(value || '', 'utf8');
                     argsBuffer.writeUInt32LE(strBytes.length, offset);
                     offset += 4;
                     strBytes.copy(argsBuffer, offset);
                     offset += strBytes.length;
                 } else if (typeName === 'bool') {
-                    argsBuffer.writeUInt8(value === 'true' ? 1 : 0, offset);
+                const normalized = (value ?? '').toString().trim().toLowerCase();
+                if (!normalized || normalized === 'false' || normalized === '0') {
+                  argsBuffer.writeUInt8(0, offset);
+                } else if (normalized === 'true' || normalized === '1') {
+                  argsBuffer.writeUInt8(1, offset);
+                } else {
+                  throw new Error(`[${arg.name}] Invalid bool value. Use true/false or 1/0.`);
+                }
                     offset += 1;
-                } else if (typeName === 'publicKey' || typeName === 'PublicKey') {
+              } else if (typeName === 'publickey' || typeName === 'pubkey') {
                     try {
                         const pubkey = new PublicKey(value);
                         const pubkeyBytes = pubkey.toBuffer();
@@ -1048,30 +1210,43 @@ function ExecutorModal({
                           </button>
                          </div>
                              <div className="grid gap-3">
-                                {instruction.args.map((arg, i) => (
+                                {instruction.args.map((arg, i) => {
+                                  const typeLabel = resolveArgType(arg.type);
+                                  const normalizedType = typeLabel.toLowerCase();
+                                  const isPubkeyArg =
+                                    normalizedType === "pubkey" ||
+                                    normalizedType === "publickey";
+
+                                  return (
                                     <div key={i} className="flex flex-col space-y-1.5">
-                                        <label className="text-sm font-medium flex justify-between">
-                                            {arg.name}
-                                            <span className="text-xs text-muted-foreground font-mono">
-                                  {resolveArgType(arg.type)}
-                                            </span>
-                                        </label>
-                              <div className="flex gap-2">
-                                <input 
-                                  value={argValues[arg.name] || ""}
-                                  onChange={(e) => setArgValues(prev => ({...prev, [arg.name]: e.target.value}))}
-                                  placeholder={`Value for ${arg.name}`}
-                                  className="flex-1 bg-background border border-border rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-primary/50 outline-none"
-                                />
-                                <button
-                                  onClick={() => handleGenerateArgValue(arg)}
-                                  className="px-2 py-1 text-xs border border-border rounded-md bg-primary/10 text-primary hover:bg-primary/20"
-                                >
-                                  Generate
-                                </button>
-                              </div>
+                                      <label className="text-sm font-medium flex justify-between">
+                                        {arg.name}
+                                        <span className="text-xs text-muted-foreground font-mono">
+                                          {typeLabel}
+                                        </span>
+                                      </label>
+                                      <div className="flex gap-2">
+                                        <input 
+                                          value={argValues[arg.name] || ""}
+                                          onChange={(e) => setArgValues(prev => ({...prev, [arg.name]: e.target.value}))}
+                                          placeholder={isPubkeyArg ? "Auto-generated Pubkey" : `Value for ${arg.name}`}
+                                          className="flex-1 bg-background border border-border rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-primary/50 outline-none"
+                                        />
+                                        <button
+                                          onClick={() => handleGenerateArgValue(arg)}
+                                          className="px-2 py-1 text-xs border border-border rounded-md bg-primary/10 text-primary hover:bg-primary/20"
+                                        >
+                                          Generate
+                                        </button>
+                                      </div>
+                                      {isPubkeyArg && (
+                                        <p className="text-xs text-muted-foreground">
+                                          We pre-filled a fresh Solana address for you—replace it with any pubkey as needed.
+                                        </p>
+                                      )}
                                     </div>
-                                ))}
+                                  );
+                                })}
                              </div>
                         </div>
                     )}
