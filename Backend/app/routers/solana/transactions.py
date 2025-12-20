@@ -13,12 +13,64 @@ import os
 import base64
 import logging
 import json
+import re
+from typing import Any, Dict, List, Optional
 from solders.keypair import Keypair
 from ...core.configs import settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tx", tags=["Solana - Transactions"])
+
+
+def _extract_contract_error_message(logs: List[str]) -> Optional[str]:
+    patterns = [
+        re.compile(r"Error Message:\s*(.+)", re.IGNORECASE),
+        re.compile(r"Program log:\s*Error:\s*(.+)", re.IGNORECASE),
+        re.compile(r"Contract reported:\s*(.+)", re.IGNORECASE),
+    ]
+
+    for log in logs:
+        for pattern in patterns:
+            match = pattern.search(log)
+            if match:
+                return match.group(1).strip()
+    return None
+
+
+def _extract_contract_error_code(logs: List[str]) -> Optional[str]:
+    code_pattern = re.compile(r"Error Code:\s*([A-Za-z0-9_]+)", re.IGNORECASE)
+    number_pattern = re.compile(r"Error Number:\s*(\d+)", re.IGNORECASE)
+
+    for log in logs:
+        match = code_pattern.search(log)
+        if match:
+            return match.group(1)
+        match = number_pattern.search(log)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _build_error_detail(
+    message: str,
+    *,
+    logs: Optional[List[str]] = None,
+    reason: Optional[str] = None,
+    code: Optional[str] = None,
+    program_error: Optional[Any] = None,
+):
+    detail: Dict[str, Any] = {"message": message}
+    if reason:
+        detail["friendly_error"] = reason
+        detail["reason"] = reason
+    if logs is not None:
+        detail["logs"] = logs
+    if code:
+        detail["code"] = code
+    if program_error is not None:
+        detail["program_error"] = program_error
+    return detail
 
 
 def get_backend_keypair() -> Keypair:
@@ -315,9 +367,17 @@ async def send_transaction(request: SendTransactionRequest):
                     simulation_error,
                     simulation_logs,
                 )
+                friendly_error = _extract_contract_error_message(simulation_logs)
+                error_code = _extract_contract_error_code(simulation_logs)
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Transaction simulation failed: {simulation_error}",
+                    detail=_build_error_detail(
+                        "Transaction simulation failed",
+                        logs=simulation_logs,
+                        reason=friendly_error,
+                        code=error_code,
+                        program_error=simulation_error,
+                    ),
                 )
 
         result = await rpc_client.send_transaction(signed_transaction_base64)
@@ -342,7 +402,11 @@ async def send_transaction(request: SendTransactionRequest):
         ):
             raise HTTPException(
                 status_code=400,
-                detail=f"Transaction signature verification failed. Ensure all required signers have signed. Error: {error_msg}",
+                detail=_build_error_detail(
+                    "Transaction signature verification failed. Ensure all required signers have signed.",
+                    logs=simulation_logs,
+                    reason=error_msg,
+                ),
             )
 
         if (
@@ -351,11 +415,21 @@ async def send_transaction(request: SendTransactionRequest):
             or "Transaction simulation failed" in error_msg
         ):
             raise HTTPException(
-                status_code=400, detail=f"Transaction simulation failed: {error_msg}"
+                status_code=400,
+                detail=_build_error_detail(
+                    "Transaction simulation failed",
+                    logs=simulation_logs,
+                    reason=error_msg,
+                ),
             )
 
         raise HTTPException(
-            status_code=500, detail=f"Error sending transaction: {error_msg}"
+            status_code=500,
+            detail=_build_error_detail(
+                "Error sending transaction",
+                logs=simulation_logs,
+                reason=error_msg,
+            ),
         )
     finally:
         await rpc_client.close()

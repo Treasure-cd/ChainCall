@@ -58,6 +58,7 @@ interface ApiSendTxResponse {
   detail?: string | Record<string, any>;
   code?: string;
   reason?: string;
+  friendly_error?: string;
 }
 
 type ReturnFieldType =
@@ -293,6 +294,12 @@ function detailToMessage(detail: ApiSendTxResponse["detail"]): string | undefine
   }
 
   if (typeof detail === "object") {
+    if (typeof (detail as any).friendly_error === "string") {
+      return (detail as any).friendly_error;
+    }
+    if (typeof (detail as any).reason === "string") {
+      return (detail as any).reason;
+    }
     if (typeof detail.message === "string") {
       return detail.message;
     }
@@ -355,18 +362,44 @@ function deriveFriendlyError(
   return `${defaultMessage} See contract logs below for details.`;
 }
 
-const SIMPLE_NUMERIC_TYPES = new Set([
-  "u8",
-  "u16",
-  "u32",
-  "u64",
-  "u128",
-  "i8",
-  "i16",
-  "i32",
-  "i64",
-  "i128",
-]);
+function extractLogsFromResponse(json: ApiSendTxResponse): string[] {
+  if (Array.isArray(json.logs)) {
+    return json.logs;
+  }
+
+  if (json.detail && typeof json.detail === "object") {
+    const potentialLogs = (json.detail as any).logs;
+    if (Array.isArray(potentialLogs)) {
+      return potentialLogs;
+    }
+  }
+
+  return [];
+}
+
+type NumericTypeInfo = {
+  bits: number;
+  signed: boolean;
+  useBigInt?: boolean;
+};
+
+const NUMERIC_TYPE_INFO: Record<string, NumericTypeInfo> = {
+  u8: { bits: 8, signed: false },
+  u16: { bits: 16, signed: false },
+  u32: { bits: 32, signed: false },
+  u64: { bits: 64, signed: false, useBigInt: true },
+  u128: { bits: 128, signed: false, useBigInt: true },
+  i8: { bits: 8, signed: true },
+  i16: { bits: 16, signed: true },
+  i32: { bits: 32, signed: true },
+  i64: { bits: 64, signed: true, useBigInt: true },
+  i128: { bits: 128, signed: true, useBigInt: true },
+};
+
+function randomInt(min: number, max: number): number {
+  if (min === max) return min;
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
 
 function resolveArgType(type: IdlArg["type"]): string {
   if (typeof type === "string") {
@@ -388,16 +421,32 @@ function resolveArgType(type: IdlArg["type"]): string {
 function generateValueForType(typeName: string): string {
   const normalized = typeName.toLowerCase();
 
-  if (SIMPLE_NUMERIC_TYPES.has(normalized)) {
-    const isSigned = normalized.startsWith("i");
-    const range = 1_000_000;
-    if (isSigned) {
-      const magnitude = Math.floor(Math.random() * range);
-      const negativeBias = Math.random() < 0.75;
-      const value = negativeBias ? -magnitude || -1 : magnitude;
+  const numericInfo = NUMERIC_TYPE_INFO[normalized];
+  if (numericInfo) {
+    if (numericInfo.useBigInt) {
+      const magnitude = BigInt(Math.floor(Math.random() * 10_000)) + 1n;
+      let value = magnitude;
+      if (numericInfo.signed) {
+        const negativeBias = Math.random() < 0.75;
+        value = negativeBias ? -magnitude : magnitude;
+      }
       return value.toString();
     }
-    return Math.floor(Math.random() * range).toString();
+
+    const { bits, signed } = numericInfo;
+    const max = signed ? 2 ** (bits - 1) - 1 : 2 ** bits - 1;
+    const min = signed ? -(2 ** (bits - 1)) : 0;
+
+    if (signed) {
+      const preferNegative = Math.random() < 0.75;
+      if (preferNegative) {
+        const upper = Math.min(-1, max);
+        return randomInt(min, upper).toString();
+      }
+      return randomInt(0, max).toString();
+    }
+
+    return randomInt(min, max).toString();
   }
 
   if (normalized === "bool") {
@@ -1144,19 +1193,22 @@ function ExecutorModal({
             } else {
               const baseError =
                 json.error ||
+                json.friendly_error ||
                 detailToMessage(json.detail) ||
                 json.reason ||
                 json.code ||
                 `Request failed (${res.status})`;
-              const logs = json.logs || [];
+              const logs = extractLogsFromResponse(json);
               setTxLogs(logs);
               setResponseMessage(deriveFriendlyError(baseError, logs));
               setRawReturnData(json.return_data || null);
             }
 
         } catch (error: any) {
-            setResponseStatus(500);
-            setResponseMessage(error.message || "Failed to send transaction");
+          const friendly = error?.message || "Failed to send transaction";
+          const isUserError = typeof friendly === "string" && friendly.trim().startsWith("[");
+          setResponseStatus(isUserError ? 400 : 500);
+          setResponseMessage(friendly);
             setTxLogs([]);
             setRawReturnData(null);
             setReturnDataInfo(null);
