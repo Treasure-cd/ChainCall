@@ -116,7 +116,7 @@ async def get_idl_methods(
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error fetching IDL methods, ensure program_id is correct: and idl is enambled/deployed {str(e)}"
+            detail=f"Error fetching IDL methods, ensure program_id/network is correct: and idl is enambled/deployed {str(e)}"
         )
     finally:
         await rpc_client.close()
