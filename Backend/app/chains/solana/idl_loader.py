@@ -8,10 +8,9 @@ from solders.pubkey import Pubkey
 from solana.rpc.async_api import AsyncClient
 from ..base.idl_loader import BaseIDLLoader
 from .rpc_client import SolanaRPCClient
-from anchorpy.provider import Provider,Wallet
+from anchorpy.provider import Provider, Wallet
 from anchorpy.program.core import Program
-
-
+from anchorpy import Idl
 
 
 ANCHOR_IDL_SEED = b"anchor:idl"
@@ -34,15 +33,32 @@ class SolanaIDLLoader(BaseIDLLoader):
         self.rpc_client = rpc_client
         self.rpc_url = rpc_client.rpc_url
 
-    async def fetch_idl(self, program_id: str) :
+    async def fetch_idl(self, program_id: str):
         client = AsyncClient(self.rpc_url)
-        provider = Provider(client,Wallet.dummy())
-        idl = await Program.fetch_idl(Pubkey.from_string(program_id),provider)
-        
+        provider = Provider(client, Wallet.dummy())
+        idl = await Program.fetch_idl(Pubkey.from_string(program_id), provider)
+
         return json.loads(idl.to_json()) if idl else None
-        
-            
-        
+
+    async def get_idl_with_fallback(
+        self, program_id: str, idl_content: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Returns the IDL from the provided content if available, otherwise fetches it from the chain.
+        """
+        if idl_content:
+            return idl_content
+        return await self.fetch_idl(program_id)
+
+    def get_program(self, program_id: str, idl_dict: Dict[str, Any]) -> Program:
+        """
+        Constructs an Anchor Program instance from a provided IDL dictionary.
+        """
+        idl = Idl.from_json(json.dumps(idl_dict))
+        client = AsyncClient(self.rpc_url)
+        provider = Provider(client, Wallet.dummy())
+        return Program(idl, Pubkey.from_string(program_id), provider)
+
     def parse_instructions(self, idl: Dict[str, Any]) -> List[Dict[str, Any]]:
         instructions = idl.get("instructions", [])
         parsed = []

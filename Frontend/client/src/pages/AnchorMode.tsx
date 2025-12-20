@@ -2,7 +2,8 @@ import { useState, useEffect } from "react";
 import { Search, Loader2, Play, Box, Key, X, ArrowRight, Wallet, Activity } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, Keypair } from "@solana/web3.js";
+import { sha256 } from "js-sha256";
 
 interface IdlArg {
   name: string;
@@ -36,12 +37,27 @@ interface ApiSendTxRequest {
   instruction_data: string;
   sign_with_backend: boolean;
   fee_payer: string;
+  additional_signers?: Array<{
+    name: string;
+    secret_key: number[];
+  }>;
 }
 
 import { Buffer } from 'buffer';
 
+const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
+
+// Convert camelCase/PascalCase to snake_case for Anchor discriminator
+function toSnakeCase(str: string): string {
+  return str
+    .replace(/([A-Z])/g, (match, p1, offset) => (offset > 0 ? '_' : '') + p1.toLowerCase())
+    .replace(/^_/, ''); // Remove leading underscore if first char was uppercase
+}
+
 function getInstructionDiscriminator(instructionName: string): Buffer {
-  const hash = require('js-sha256').sha256(`global:${instructionName}`);
+  const snakeCaseName = toSnakeCase(instructionName);
+  console.log(`Discriminator: global:${snakeCaseName} (from ${instructionName})`);
+  const hash = sha256(`global:${snakeCaseName}`);
   return Buffer.from(hash, 'hex').slice(0, 8);
 }
 
@@ -246,6 +262,7 @@ export default function AnchorMode() {
           <ExecutorModal 
             instruction={selectedInstruction} 
             programId={programId}
+            network={network}
             onClose={() => setSelectedInstruction(null)} 
           />
         )}
@@ -257,10 +274,12 @@ export default function AnchorMode() {
 function ExecutorModal({ 
     instruction, 
     programId, 
+    network,
     onClose 
 }: { 
     instruction: IdlInstruction; 
     programId: string;
+    network: string;
     onClose: () => void 
 }) {
     const [isSending, setIsSending] = useState(false);
@@ -269,6 +288,69 @@ function ExecutorModal({
     
     const [argValues, setArgValues] = useState<Record<string, string>>({});
     const [accountValues, setAccountValues] = useState<Record<string, string>>({});
+    const [backendWallet, setBackendWallet] = useState<string | null>(null);
+    const [generatedKeypairs, setGeneratedKeypairs] = useState<Record<string, { pubkey: string; secret_key: number[] }>>({});
+
+    useEffect(() => {
+      setArgValues({});
+      setAccountValues({});
+      setGeneratedKeypairs({});
+    }, [instruction.name]);
+
+    useEffect(() => {
+        const fetchBackendWallet = async () => {
+            try {
+                const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+                const res = await fetch(`${baseUrl}/solana/tx/wallet`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setBackendWallet(data.pubkey);
+                }
+            } catch (e) {
+                console.error("Failed to fetch backend wallet", e);
+            }
+        };
+        fetchBackendWallet();
+    }, []);
+
+    const handleGenerateAccount = (accountName: string) => {
+      const keypair = Keypair.generate();
+      const pubkey = keypair.publicKey.toBase58();
+      const secret_key = Array.from(keypair.secretKey);
+
+      setGeneratedKeypairs((prev) => ({
+        ...prev,
+        [accountName]: { pubkey, secret_key },
+      }));
+
+      setAccountValues((prev) => ({
+        ...prev,
+        [accountName]: pubkey,
+      }));
+    };
+
+    useEffect(() => {
+      if (!instruction?.accounts?.length) {
+        return;
+      }
+
+      setAccountValues((prev) => {
+        let changed = false;
+        const next = { ...prev };
+
+        instruction.accounts.forEach((acc) => {
+          const name = acc.name.toLowerCase();
+          if (name === "systemprogram" || name === "system_program") {
+            if (next[acc.name] !== SYSTEM_PROGRAM_ID) {
+              next[acc.name] = SYSTEM_PROGRAM_ID;
+              changed = true;
+            }
+          }
+        });
+
+        return changed ? next : prev;
+      });
+    }, [instruction]);
 
     const handleSend = async () => {
         setIsSending(true);
@@ -277,6 +359,15 @@ function ExecutorModal({
 
         const discriminator = getInstructionDiscriminator(instruction.name);
         
+        // Validate accounts
+        for (const acc of instruction.accounts) {
+            if (!accountValues[acc.name]) {
+                setResponseMessage(`Error: Missing public key for account '${acc.name}'`);
+                setIsSending(false);
+                return;
+            }
+        }
+
         try {
             const argsBuffer = Buffer.alloc(1024);
             let offset = 0;
@@ -284,33 +375,56 @@ function ExecutorModal({
             discriminator.copy(argsBuffer, offset);
             offset += 8;
             
+            console.log(`Instruction: ${instruction.name}, Args count: ${instruction.args.length}`);
+            console.log(`Discriminator (hex): ${discriminator.toString('hex')}`);
+            
             for (const arg of instruction.args) {
                 const value = argValues[arg.name];
-                const argType = typeof arg.type === 'string' ? arg.type : 'string';
                 
-                if (argType === 'u64' || argType === 'u128') {
+                let typeName = '';
+                if (typeof arg.type === 'string') {
+                    typeName = arg.type;
+                } else if (typeof arg.type === 'object' && arg.type !== null) {
+                    // Simple handling for complex types - just to identify them
+                    if ('defined' in arg.type) typeName = 'defined';
+                    else if ('vec' in arg.type) typeName = 'vec';
+                    else if ('option' in arg.type) typeName = 'option';
+                    else if ('array' in arg.type) typeName = 'array';
+                    else typeName = 'unknown';
+                }
+                
+                console.log(`Processing arg ${arg.name} of type`, arg.type, `(treated as ${typeName}) with value:`, value);
+
+                if (typeName === 'u64' || typeName === 'u128' || typeName === 'i64' || typeName === 'i128') {
                     const bn = BigInt(value || '0');
-                    argsBuffer.writeBigUInt64LE(bn, offset);
+                    if (typeName.startsWith('u')) argsBuffer.writeBigUInt64LE(bn, offset);
+                    else argsBuffer.writeBigInt64LE(bn, offset);
                     offset += 8;
-                } else if (argType === 'u32') {
-                    argsBuffer.writeUInt32LE(parseInt(value || '0'), offset);
+                } else if (typeName === 'u32' || typeName === 'i32') {
+                    const val = parseInt(value || '0');
+                    if (typeName.startsWith('u')) argsBuffer.writeUInt32LE(val, offset);
+                    else argsBuffer.writeInt32LE(val, offset);
                     offset += 4;
-                } else if (argType === 'u16') {
-                    argsBuffer.writeUInt16LE(parseInt(value || '0'), offset);
+                } else if (typeName === 'u16' || typeName === 'i16') {
+                    const val = parseInt(value || '0');
+                    if (typeName.startsWith('u')) argsBuffer.writeUInt16LE(val, offset);
+                    else argsBuffer.writeInt16LE(val, offset);
                     offset += 2;
-                } else if (argType === 'u8') {
-                    argsBuffer.writeUInt8(parseInt(value || '0'), offset);
+                } else if (typeName === 'u8' || typeName === 'i8') {
+                    const val = parseInt(value || '0');
+                    if (typeName.startsWith('u')) argsBuffer.writeUInt8(val, offset);
+                    else argsBuffer.writeInt8(val, offset);
                     offset += 1;
-                } else if (argType === 'string') {
+                } else if (typeName === 'string') {
                     const strBytes = Buffer.from(value || '', 'utf8');
                     argsBuffer.writeUInt32LE(strBytes.length, offset);
                     offset += 4;
                     strBytes.copy(argsBuffer, offset);
                     offset += strBytes.length;
-                } else if (argType === 'bool') {
+                } else if (typeName === 'bool') {
                     argsBuffer.writeUInt8(value === 'true' ? 1 : 0, offset);
                     offset += 1;
-                } else if (argType === 'publicKey' || argType === 'PublicKey') {
+                } else if (typeName === 'publicKey' || typeName === 'PublicKey') {
                     try {
                         const pubkey = new PublicKey(value);
                         const pubkeyBytes = pubkey.toBuffer();
@@ -320,6 +434,9 @@ function ExecutorModal({
                         throw new Error(`Invalid PublicKey for ${arg.name}`);
                     }
                 } else {
+                    console.warn(`Unsupported or complex type for arg ${arg.name}:`, arg.type);
+                    // Fallback to string for now, but log warning. 
+                    // This is likely where it fails for complex types.
                     const strBytes = Buffer.from(value || '', 'utf8');
                     argsBuffer.writeUInt32LE(strBytes.length, offset);
                     offset += 4;
@@ -330,21 +447,48 @@ function ExecutorModal({
             
             const finalBuffer = argsBuffer.slice(0, offset);
             const instructionData = finalBuffer.toString('base64');
+            
+            console.log(`Final instruction data (hex): ${finalBuffer.toString('hex')}`);
+            console.log(`Final instruction data (base64): ${instructionData}`);
+            console.log(`Total bytes: ${offset} (8 discriminator + ${offset - 8} args)`);
+
+            const accountsPayload = instruction.accounts.map(acc => {
+              const generated = generatedKeypairs[acc.name];
+              return {
+                pubkey: generated?.pubkey || accountValues[acc.name] || "",
+                is_signer: acc.isSigner || Boolean(generated),
+                is_writable: acc.isMut,
+              };
+            });
+
+            const additionalSigners = Object.entries(generatedKeypairs).map(
+              ([name, kp]) => ({ name, secret_key: kp.secret_key })
+            );
+
+            console.log("Accounts payload:", accountsPayload);
+            console.log("Additional signers:", additionalSigners.map((s) => s.name));
+
+            const feePayerValue =
+              accountValues['authority'] ||
+              accountValues['payer'] ||
+              accountValues['signer'] ||
+              backendWallet ||
+              "";
 
             const payload: ApiSendTxRequest = {
-                rpc_url: "https://api.devnet.solana.com",
+                rpc_url: network === "mainnet" 
+                    ? "https://api.mainnet-beta.solana.com" 
+                    : "https://api.devnet.solana.com",
                 program_id: programId,
-                accounts: instruction.accounts.map(acc => ({
-                    pubkey: accountValues[acc.name] || "",
-                    is_signer: acc.isSigner,
-                    is_writable: acc.isMut
-                })),
+              accounts: accountsPayload,
                 instruction_data: instructionData,
-                sign_with_backend: false,
-                fee_payer: accountValues['authority'] || accountValues['payer'] || ""
+                sign_with_backend: true,
+              fee_payer: feePayerValue,
+              additional_signers: additionalSigners.length ? additionalSigners : undefined,
             };
 
-            const res = await fetch("https://chaincall.onrender.com/solana/tx/send", {
+            const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+            const res = await fetch(`${baseUrl}/solana/tx/send`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload)
@@ -423,23 +567,56 @@ function ExecutorModal({
                            <Key className="h-3 w-3" /> Accounts Config
                         </h4>
                         <div className="grid gap-3">
-                            {instruction.accounts.map((acc, i) => (
-                                <div key={i} className="flex flex-col space-y-1.5">
-                                    <label className="text-sm font-medium flex items-center gap-2">
-                                        {acc.name}
-                                        <div className="flex gap-1">
-                                            {acc.isMut && <span className="text-[10px] bg-orange-500/10 text-orange-500 px-1.5 py-0.5 rounded border border-orange-500/20">Writable</span>}
-                                            {acc.isSigner && <span className="text-[10px] bg-blue-500/10 text-blue-500 px-1.5 py-0.5 rounded border border-blue-500/20">Signer</span>}
-                                        </div>
-                                    </label>
-                                    <input 
-                                        value={accountValues[acc.name] || ""}
-                                        onChange={(e) => setAccountValues(prev => ({...prev, [acc.name]: e.target.value}))}
-                                        placeholder="Public Key"
-                                        className="bg-background border border-border rounded-md px-3 py-2 text-sm font-mono focus:ring-1 focus:ring-primary/50 outline-none"
-                                    />
+                          {instruction.accounts.map((acc, i) => {
+                            const normalizedName = acc.name.toLowerCase();
+                            const isSystemProgram = normalizedName === "systemprogram" || normalizedName === "system_program";
+
+                            return (
+                              <div key={i} className="flex flex-col space-y-1.5">
+                                <label className="text-sm font-medium flex items-center gap-2">
+                                  {acc.name}
+                                  <div className="flex gap-1">
+                                    {acc.isMut && <span className="text-[10px] bg-orange-500/10 text-orange-500 px-1.5 py-0.5 rounded border border-orange-500/20">Writable</span>}
+                                    {acc.isSigner && <span className="text-[10px] bg-blue-500/10 text-blue-500 px-1.5 py-0.5 rounded border border-blue-500/20">Signer</span>}
+                                    {isSystemProgram && <span className="text-[10px] bg-green-500/10 text-green-500 px-1.5 py-0.5 rounded border border-green-500/20">System Program</span>}
+                                  </div>
+                                </label>
+                                <div className="flex gap-2">
+                                  <input 
+                                    value={isSystemProgram ? SYSTEM_PROGRAM_ID : accountValues[acc.name] || ""}
+                                    onChange={(e) => {
+                                      if (isSystemProgram) return;
+                                      setAccountValues(prev => ({...prev, [acc.name]: e.target.value}));
+                                    }}
+                                    placeholder={isSystemProgram ? SYSTEM_PROGRAM_ID : "Public Key"}
+                                    disabled={isSystemProgram}
+                                    className="flex-1 bg-background border border-border rounded-md px-3 py-2 text-sm font-mono focus:ring-1 focus:ring-primary/50 outline-none disabled:bg-muted"
+                                  />
+                                  {backendWallet && acc.isSigner && !isSystemProgram && (
+                                    <button 
+                                      onClick={() => setAccountValues(prev => ({...prev, [acc.name]: backendWallet}))}
+                                      className="px-2 py-1 text-xs bg-secondary hover:bg-secondary/80 rounded border border-border"
+                                      title="Use Backend Wallet"
+                                    >
+                                      Backend
+                                    </button>
+                                  )}
+                                  {!isSystemProgram && (
+                                    <button
+                                      onClick={() => handleGenerateAccount(acc.name)}
+                                      className="px-2 py-1 text-xs bg-primary text-primary-foreground rounded border border-border"
+                                      title="Generate a new keypair for this account"
+                                    >
+                                      Generate
+                                    </button>
+                                  )}
                                 </div>
-                            ))}
+                                {generatedKeypairs[acc.name] && (
+                                  <span className="text-xs text-green-500 font-mono">Generated signer: {generatedKeypairs[acc.name].pubkey}</span>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                     </div>
                 </div>

@@ -188,6 +188,27 @@ async def send_transaction(request: SendTransactionRequest):
             logger.error(f"Backend keypair error: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
+        additional_keypairs = []
+        if request.additional_signers:
+            for signer in request.additional_signers:
+                try:
+                    if not signer.secret_key:
+                        raise ValueError("Missing secret key bytes")
+                    kp = Keypair.from_bytes(bytes(signer.secret_key))
+                    additional_keypairs.append(kp)
+                    logger.info(
+                        f"Loaded additional signer '{signer.name}' -> {kp.pubkey()}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Invalid additional signer {signer.name}: {str(e)}",
+                        exc_info=True,
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid additional signer {signer.name}: {str(e)}",
+                    )
+
         rpc_client = SolanaRPCClient(request.rpc_url)
         tx_builder = SolanaTxBuilder()
 
@@ -224,14 +245,13 @@ async def send_transaction(request: SendTransactionRequest):
                 [instruction], fee_payer, blockhash
             )
 
-            # Sign with backend keypair
+            # Sign with backend + any additional signers
             unsigned_tx = unsigned_result["transaction"]
             try:
                 # Use partial_sign to allow for cases where backend is one of multiple signers
                 # (though sending will fail if others are missing)
-                unsigned_tx.partial_sign(
-                    [backend_keypair], unsigned_tx.message.recent_blockhash
-                )
+                signers = [backend_keypair] + additional_keypairs
+                unsigned_tx.partial_sign(signers, unsigned_tx.message.recent_blockhash)
             except ValueError as e:
                 if "keypair-pubkey mismatch" in str(e):
                     raise HTTPException(

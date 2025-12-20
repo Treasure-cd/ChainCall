@@ -60,6 +60,11 @@ class AccountMeta(BaseModel):
     is_writable: bool = False
 
 
+class AdditionalSigner(BaseModel):
+    name: str
+    secret_key: List[int]
+
+
 class BuildTransactionRequest(BaseModel):
     rpc_url: Optional[str] = None
     program_id: str
@@ -102,6 +107,7 @@ class SendTransactionRequest(BaseModel):
     sign_with_backend: bool = Field(
         default=False, description="Sign and send with backend keypair (testnet only)"
     )
+    additional_signers: Optional[List[AdditionalSigner]] = None
 
 
 class SendTransactionResponse(BaseModel):
