@@ -115,6 +115,8 @@ class SendTransactionResponse(BaseModel):
     signature: str
     success: bool
     error: Optional[str] = None
+    logs: Optional[List[str]] = None
+    return_data: Optional[Dict[str, Any]] = None
 
 
 class IDLInstruction(BaseModel):

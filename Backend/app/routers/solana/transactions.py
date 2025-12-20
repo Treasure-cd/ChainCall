@@ -172,11 +172,12 @@ async def send_transaction(request: SendTransactionRequest):
             )
 
         # Check required fields for building
-        if not all([request.program_id, request.accounts, request.instruction_data]):
+        if not all([request.program_id, request.instruction_data]):
             raise HTTPException(
                 status_code=400,
-                detail="program_id, accounts, and instruction_data required for backend signing",
+                detail="program_id and instruction_data required for backend signing",
             )
+        accounts_payload = request.accounts or []
 
         # Load backend keypair
         try:
@@ -227,7 +228,7 @@ async def send_transaction(request: SendTransactionRequest):
                     "is_signer": acc.is_signer,
                     "is_writable": acc.is_writable,
                 }
-                for acc in request.accounts
+                for acc in accounts_payload
             ]
 
             logger.info(
@@ -288,11 +289,49 @@ async def send_transaction(request: SendTransactionRequest):
         signed_transaction_base64 = request.transaction_base64
         rpc_client = SolanaRPCClient(request.rpc_url)
 
+    simulation_logs = []
+    simulation_return_data = None
+
     try:
+        simulation_result = None
+        try:
+            simulation_result = await rpc_client.simulate_transaction(
+                signed_transaction_base64
+            )
+        except Exception as sim_err:
+            logger.warning(
+                f"Unable to simulate transaction before send: {str(sim_err)}",
+                exc_info=True,
+            )
+
+        if simulation_result:
+            simulation_logs = simulation_result.get("logs") or []
+            simulation_return_data = simulation_result.get("returnData")
+            simulation_error = simulation_result.get("err")
+
+            if simulation_error:
+                logger.error(
+                    "Simulation failed prior to send: %s | Logs: %s",
+                    simulation_error,
+                    simulation_logs,
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Transaction simulation failed: {simulation_error}",
+                )
+
         result = await rpc_client.send_transaction(signed_transaction_base64)
 
-        return SendTransactionResponse(chain="solana", signature=result, success=True)
+        return SendTransactionResponse(
+            chain="solana",
+            signature=result,
+            success=True,
+            logs=simulation_logs,
+            return_data=simulation_return_data,
+        )
 
+    except HTTPException:
+        raise
     except Exception as e:
         error_msg = str(e)
         print(f"DEBUG: Transaction Send Error: {error_msg}")

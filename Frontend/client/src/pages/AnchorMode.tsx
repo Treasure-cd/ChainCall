@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { PublicKey, Keypair } from "@solana/web3.js";
 import { sha256 } from "js-sha256";
+import { Buffer } from "buffer";
 
 interface IdlArg {
   name: string;
@@ -43,7 +44,77 @@ interface ApiSendTxRequest {
   }>;
 }
 
-import { Buffer } from 'buffer';
+interface ApiReturnData {
+  programId: string;
+  data: [string, string];
+}
+
+interface ApiSendTxResponse {
+  signature?: string;
+  success?: boolean;
+  logs?: string[];
+  return_data?: ApiReturnData | null;
+  error?: string;
+  detail?: string | Record<string, any>;
+  code?: string;
+  reason?: string;
+}
+
+type ReturnFieldType =
+  | "u8"
+  | "u16"
+  | "u32"
+  | "u64"
+  | "u128"
+  | "i8"
+  | "i16"
+  | "i32"
+  | "i64"
+  | "i128"
+  | "bool"
+  | "string"
+  | "bytes"
+  | "pubkey";
+
+interface ReturnField {
+  id: string;
+  name: string;
+  type: ReturnFieldType;
+}
+
+type DecodedReturnField = {
+  name: string;
+  type: ReturnFieldType;
+  value: string;
+};
+
+type ReturnDataInfo = {
+  programId: string;
+  base64: string;
+  hex: string;
+  encoding?: string;
+  decoded?: string;
+  fields?: DecodedReturnField[];
+};
+
+const RETURN_FIELD_TYPE_OPTIONS: { label: string; value: ReturnFieldType }[] = [
+  { label: "u8", value: "u8" },
+  { label: "u16", value: "u16" },
+  { label: "u32", value: "u32" },
+  { label: "u64", value: "u64" },
+  { label: "u128", value: "u128" },
+  { label: "i8", value: "i8" },
+  { label: "i16", value: "i16" },
+  { label: "i32", value: "i32" },
+  { label: "i64", value: "i64" },
+  { label: "i128", value: "i128" },
+  { label: "Bool", value: "bool" },
+  { label: "String", value: "string" },
+  { label: "Bytes", value: "bytes" },
+  { label: "Pubkey", value: "pubkey" },
+];
+
+const createId = () => Math.random().toString(36).slice(2, 9);
 
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
 
@@ -59,6 +130,305 @@ function getInstructionDiscriminator(instructionName: string): Buffer {
   console.log(`Discriminator: global:${snakeCaseName} (from ${instructionName})`);
   const hash = sha256(`global:${snakeCaseName}`);
   return Buffer.from(hash, 'hex').slice(0, 8);
+}
+
+function readBigIntFromBuffer(
+  buffer: Buffer,
+  offset: number,
+  byteLength: number,
+  signed = false
+): bigint {
+  let result = 0n;
+  for (let i = 0; i < byteLength; i++) {
+    const byte = BigInt(buffer[offset + i]);
+    result |= byte << BigInt(8 * i);
+  }
+
+  if (signed) {
+    const max = 1n << BigInt(byteLength * 8);
+    const threshold = max >> 1n;
+    if (result >= threshold) {
+      result -= max;
+    }
+  }
+
+  return result;
+}
+
+function decodeWithLayout(buffer: Buffer, layout: ReturnField[]): DecodedReturnField[] {
+  const decoded: DecodedReturnField[] = [];
+  let offset = 0;
+
+  for (const field of layout) {
+    const name = field.name?.trim() || `field_${decoded.length + 1}`;
+    const type = field.type;
+
+    try {
+      const ensureBytes = (required: number) => {
+        const remaining = buffer.length - offset;
+        if (remaining < required) {
+          throw new Error(`Need ${required} more bytes, only ${remaining} left`);
+        }
+      };
+
+      const numericTypes: Record<string, { bytes: number; signed: boolean }> = {
+        u8: { bytes: 1, signed: false },
+        u16: { bytes: 2, signed: false },
+        u32: { bytes: 4, signed: false },
+        u64: { bytes: 8, signed: false },
+        u128: { bytes: 16, signed: false },
+        i8: { bytes: 1, signed: true },
+        i16: { bytes: 2, signed: true },
+        i32: { bytes: 4, signed: true },
+        i64: { bytes: 8, signed: true },
+        i128: { bytes: 16, signed: true },
+      };
+
+      if (numericTypes[type]) {
+        const spec = numericTypes[type];
+        ensureBytes(spec.bytes);
+        const value = readBigIntFromBuffer(buffer, offset, spec.bytes, spec.signed);
+        decoded.push({ name, type, value: value.toString() });
+        offset += spec.bytes;
+        continue;
+      }
+
+      if (type === "bool") {
+        ensureBytes(1);
+        const value = buffer.readUInt8(offset) === 1 ? "true" : "false";
+        decoded.push({ name, type, value });
+        offset += 1;
+        continue;
+      }
+
+      if (type === "pubkey") {
+        ensureBytes(32);
+        const pubkeyBytes = buffer.subarray(offset, offset + 32);
+        const pubkey = new PublicKey(pubkeyBytes).toBase58();
+        decoded.push({ name, type, value: pubkey });
+        offset += 32;
+        continue;
+      }
+
+      if (type === "string" || type === "bytes") {
+        ensureBytes(4);
+        const length = buffer.readUInt32LE(offset);
+        offset += 4;
+        ensureBytes(length);
+        const slice = buffer.subarray(offset, offset + length);
+        offset += length;
+        const value = type === "string" ? slice.toString("utf8") : slice.toString("hex");
+        decoded.push({ name, type, value });
+        continue;
+      }
+
+      throw new Error(`Unsupported field type '${type}'`);
+    } catch (error) {
+      decoded.push({
+        name,
+        type,
+        value: `Decode error: ${(error as Error).message}`,
+      });
+      break;
+    }
+  }
+
+  return decoded;
+}
+
+function formatReturnData(
+  raw: ApiReturnData | null,
+  layout: ReturnField[]
+): ReturnDataInfo | null {
+  if (!raw || !raw.data?.length) {
+    return null;
+  }
+
+  const [payload, encoding] = raw.data;
+
+  try {
+    const buffer = Buffer.from(payload, "base64");
+    const hex = buffer.toString("hex");
+    const baseInfo: ReturnDataInfo = {
+      programId: raw.programId,
+      base64: payload,
+      hex,
+      encoding,
+    };
+
+    if (layout.length) {
+      return {
+        ...baseInfo,
+        fields: decodeWithLayout(buffer, layout),
+      };
+    }
+
+    if (buffer.length === 8) {
+      try {
+        baseInfo.decoded = buffer.readBigUInt64LE(0).toString();
+      } catch (err) {
+        console.error("Failed to parse u64 return data", err);
+      }
+    }
+
+    return baseInfo;
+  } catch (err) {
+    console.error("Failed to decode return data", err);
+    return {
+      programId: raw.programId,
+      base64: payload,
+      hex: "",
+      encoding,
+    };
+  }
+}
+
+function detailToMessage(detail: ApiSendTxResponse["detail"]): string | undefined {
+  if (!detail) {
+    return undefined;
+  }
+
+  if (typeof detail === "string") {
+    return detail;
+  }
+
+  if (typeof detail === "object") {
+    if (typeof detail.message === "string") {
+      return detail.message;
+    }
+    if (typeof detail.detail === "string") {
+      return detail.detail;
+    }
+    if (typeof detail.reason === "string") {
+      return detail.reason;
+    }
+
+    try {
+      return JSON.stringify(detail);
+    } catch (err) {
+      console.error("Failed to stringify error detail", err);
+      return undefined;
+    }
+  }
+
+  return undefined;
+}
+
+function deriveFriendlyError(
+  baseMessage: string | undefined,
+  logs: string[]
+): string {
+  const normalizedBase = baseMessage?.trim();
+  const defaultMessage =
+    normalizedBase && normalizedBase.length
+      ? normalizedBase
+      : "Transaction failed during contract execution.";
+
+  if (!logs?.length) {
+    return `${defaultMessage} Check the logs or try again.`;
+  }
+
+  const patterns: RegExp[] = [
+    /Program log: Error: (.*)/i,
+    /Program log: panicked at '([^']+)'/i,
+    /Program log: (.*failed.*)/i,
+  ];
+
+  for (const log of logs) {
+    for (const pattern of patterns) {
+      const match = log.match(pattern);
+      if (match && match[1]) {
+        const friendly = match[1].trim();
+        return `${defaultMessage} Contract reported: ${friendly}.`;
+      }
+    }
+  }
+
+  const panicLog = logs.find((log) => log.toLowerCase().includes("panicked"));
+  if (panicLog) {
+    return `${defaultMessage} Contract panicked: ${panicLog.replace(
+      /Program log:/i,
+      ""
+    ).trim()}.`;
+  }
+
+  return `${defaultMessage} See contract logs below for details.`;
+}
+
+const SIMPLE_NUMERIC_TYPES = new Set([
+  "u8",
+  "u16",
+  "u32",
+  "u64",
+  "u128",
+  "i8",
+  "i16",
+  "i32",
+  "i64",
+  "i128",
+]);
+
+function resolveArgType(type: IdlArg["type"]): string {
+  if (typeof type === "string") {
+    return type;
+  }
+
+  if (type && typeof type === "object") {
+    const obj = type as Record<string, any>;
+    if ("defined" in obj) return String(obj.defined || "string");
+    if ("vec" in obj) return "vec";
+    if ("option" in obj) return resolveArgType(obj.option);
+    if ("coption" in obj) return resolveArgType(obj.coption);
+    if ("array" in obj) return "array";
+  }
+
+  return "string";
+}
+
+function generateValueForType(typeName: string): string {
+  const normalized = typeName.toLowerCase();
+
+  if (SIMPLE_NUMERIC_TYPES.has(normalized)) {
+    const isSigned = normalized.startsWith("i");
+    const range = 1_000_000;
+    if (isSigned) {
+      const magnitude = Math.floor(Math.random() * range);
+      const negativeBias = Math.random() < 0.75;
+      const value = negativeBias ? -magnitude || -1 : magnitude;
+      return value.toString();
+    }
+    return Math.floor(Math.random() * range).toString();
+  }
+
+  if (normalized === "bool") {
+    return Math.random() > 0.5 ? "true" : "false";
+  }
+
+  if (normalized === "string") {
+    return `auto_${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  if (normalized === "bytes") {
+    const bytes = Array.from({ length: 8 }, () =>
+      Math.floor(Math.random() * 256)
+    );
+    return Buffer.from(bytes).toString("hex");
+  }
+
+  if (normalized === "pubkey" || normalized === "publickey") {
+    return Keypair.generate().publicKey.toBase58();
+  }
+
+  if (normalized === "vec" || normalized === "array") {
+    return "[]";
+  }
+
+  return "";
+}
+
+function generateValueForArg(arg: IdlArg): string {
+  const typeName = resolveArgType(arg.type);
+  return generateValueForType(typeName) || "";
 }
 
 export default function AnchorMode() {
@@ -290,12 +660,26 @@ function ExecutorModal({
     const [accountValues, setAccountValues] = useState<Record<string, string>>({});
     const [backendWallet, setBackendWallet] = useState<string | null>(null);
     const [generatedKeypairs, setGeneratedKeypairs] = useState<Record<string, { pubkey: string; secret_key: number[] }>>({});
+    const [returnLayout, setReturnLayout] = useState<ReturnField[]>([]);
+    const [rawReturnData, setRawReturnData] = useState<ApiReturnData | null>(null);
+    const [returnDataInfo, setReturnDataInfo] = useState<ReturnDataInfo | null>(null);
+    const [txLogs, setTxLogs] = useState<string[]>([]);
+
+    const shouldAutoGenerateAccount = (acc: IdlAccount) => acc.isMut && !acc.isSigner;
 
     useEffect(() => {
       setArgValues({});
       setAccountValues({});
       setGeneratedKeypairs({});
+      setReturnLayout([]);
+      setRawReturnData(null);
+      setReturnDataInfo(null);
+      setTxLogs([]);
     }, [instruction.name]);
+
+    useEffect(() => {
+      setReturnDataInfo(formatReturnData(rawReturnData, returnLayout));
+    }, [rawReturnData, returnLayout]);
 
     useEffect(() => {
         const fetchBackendWallet = async () => {
@@ -314,20 +698,76 @@ function ExecutorModal({
     }, []);
 
     const handleGenerateAccount = (accountName: string) => {
-      const keypair = Keypair.generate();
-      const pubkey = keypair.publicKey.toBase58();
-      const secret_key = Array.from(keypair.secretKey);
+      setGeneratedKeypairs((prev) => {
+        const existing = prev[accountName];
+        const keypair = Keypair.generate();
+        const pubkey = keypair.publicKey.toBase58();
+        const secret_key = Array.from(keypair.secretKey);
 
-      setGeneratedKeypairs((prev) => ({
-        ...prev,
-        [accountName]: { pubkey, secret_key },
-      }));
+        if (existing?.pubkey === pubkey) {
+          return prev;
+        }
 
-      setAccountValues((prev) => ({
-        ...prev,
-        [accountName]: pubkey,
-      }));
+        setAccountValues((prevValues) => ({
+          ...prevValues,
+          [accountName]: pubkey,
+        }));
+
+        return {
+          ...prev,
+          [accountName]: { pubkey, secret_key },
+        };
+      });
     };
+
+    const handleGenerateArgValue = (arg: IdlArg) => {
+      const value = generateValueForArg(arg);
+      setArgValues((prev) => ({ ...prev, [arg.name]: value }));
+    };
+
+    const handleGenerateAllArgs = () => {
+      if (!instruction.args?.length) {
+        return;
+      }
+
+      setArgValues((prev) => {
+        const next = { ...prev };
+        instruction.args.forEach((arg) => {
+          next[arg.name] = generateValueForArg(arg);
+        });
+        return next;
+      });
+    };
+
+    useEffect(() => {
+      if (!instruction?.accounts?.length) {
+        return;
+      }
+
+      instruction.accounts.forEach((acc) => {
+        if (shouldAutoGenerateAccount(acc)) {
+          setGeneratedKeypairs((prev) => {
+            if (prev[acc.name]) {
+              return prev;
+            }
+
+            const keypair = Keypair.generate();
+            const pubkey = keypair.publicKey.toBase58();
+            const secret_key = Array.from(keypair.secretKey);
+
+            setAccountValues((prevValues) => ({
+              ...prevValues,
+              [acc.name]: pubkey,
+            }));
+
+            return {
+              ...prev,
+              [acc.name]: { pubkey, secret_key },
+            };
+          });
+        }
+      });
+    }, [instruction]);
 
     useEffect(() => {
       if (!instruction?.accounts?.length) {
@@ -352,10 +792,48 @@ function ExecutorModal({
       });
     }, [instruction]);
 
+    const handleAddReturnField = () => {
+      setReturnLayout((prev) => [
+        ...prev,
+        {
+          id: createId(),
+          name: `field_${prev.length + 1}`,
+          type: "u64",
+        },
+      ]);
+    };
+
+    const handleUpdateReturnField = (
+      id: string,
+      patch: Partial<Pick<ReturnField, "name" | "type">>
+    ) => {
+      setReturnLayout((prev) =>
+        prev.map((field) =>
+          field.id === id
+            ? {
+                ...field,
+                ...patch,
+              }
+            : field
+        )
+      );
+    };
+
+    const handleRemoveReturnField = (id: string) => {
+      setReturnLayout((prev) => prev.filter((field) => field.id !== id));
+    };
+
+    const handleClearReturnLayout = () => {
+      setReturnLayout([]);
+    };
+
     const handleSend = async () => {
         setIsSending(true);
         setResponseStatus(null);
         setResponseMessage("");
+        setRawReturnData(null);
+        setReturnDataInfo(null);
+        setTxLogs([]);
 
         const discriminator = getInstructionDiscriminator(instruction.name);
         
@@ -495,17 +973,31 @@ function ExecutorModal({
             });
 
             setResponseStatus(res.status);
-            const json = await res.json();
+            const json: ApiSendTxResponse = await res.json();
 
             if (res.ok) {
-                setResponseMessage(json.signature || "Transaction sent successfully!");
+              setResponseMessage(json.signature || "Transaction sent successfully!");
+              setTxLogs(json.logs || []);
+              setRawReturnData(json.return_data || null);
             } else {
-                setResponseMessage(json.error || `Error: ${res.status}`);
+              const baseError =
+                json.error ||
+                detailToMessage(json.detail) ||
+                json.reason ||
+                json.code ||
+                `Request failed (${res.status})`;
+              const logs = json.logs || [];
+              setTxLogs(logs);
+              setResponseMessage(deriveFriendlyError(baseError, logs));
+              setRawReturnData(json.return_data || null);
             }
 
         } catch (error: any) {
             setResponseStatus(500);
             setResponseMessage(error.message || "Failed to send transaction");
+            setTxLogs([]);
+            setRawReturnData(null);
+            setReturnDataInfo(null);
         } finally {
             setIsSending(false);
         }
@@ -538,24 +1030,46 @@ function ExecutorModal({
                 <div className="flex-1 overflow-y-auto p-6 space-y-6">
                     {instruction.args.length > 0 && (
                         <div className="space-y-4">
-                             <h4 className="text-xs font-mono uppercase tracking-wider text-muted-foreground flex items-center gap-2">
-                                Variables (Arguments)
-                             </h4>
+                         <div className="flex items-center justify-between gap-2">
+                          <h4 className="text-xs font-mono uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+                            Variables (Arguments)
+                          </h4>
+                          <button
+                            onClick={handleGenerateAllArgs}
+                            disabled={!instruction.args.length}
+                            className={cn(
+                              "px-3 py-1 text-xs rounded border border-border",
+                              instruction.args.length
+                                ? "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                                : "bg-muted text-muted-foreground cursor-not-allowed"
+                            )}
+                          >
+                            Generate All
+                          </button>
+                         </div>
                              <div className="grid gap-3">
                                 {instruction.args.map((arg, i) => (
                                     <div key={i} className="flex flex-col space-y-1.5">
                                         <label className="text-sm font-medium flex justify-between">
                                             {arg.name}
                                             <span className="text-xs text-muted-foreground font-mono">
-                                                {typeof arg.type === 'string' ? arg.type : 'custom'}
+                                  {resolveArgType(arg.type)}
                                             </span>
                                         </label>
-                                        <input 
-                                            value={argValues[arg.name] || ""}
-                                            onChange={(e) => setArgValues(prev => ({...prev, [arg.name]: e.target.value}))}
-                                            placeholder={`Value for ${arg.name}`}
-                                            className="bg-background border border-border rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-primary/50 outline-none"
-                                        />
+                              <div className="flex gap-2">
+                                <input 
+                                  value={argValues[arg.name] || ""}
+                                  onChange={(e) => setArgValues(prev => ({...prev, [arg.name]: e.target.value}))}
+                                  placeholder={`Value for ${arg.name}`}
+                                  className="flex-1 bg-background border border-border rounded-md px-3 py-2 text-sm focus:ring-1 focus:ring-primary/50 outline-none"
+                                />
+                                <button
+                                  onClick={() => handleGenerateArgValue(arg)}
+                                  className="px-2 py-1 text-xs border border-border rounded-md bg-primary/10 text-primary hover:bg-primary/20"
+                                >
+                                  Generate
+                                </button>
+                              </div>
                                     </div>
                                 ))}
                              </div>
@@ -579,6 +1093,7 @@ function ExecutorModal({
                                     {acc.isMut && <span className="text-[10px] bg-orange-500/10 text-orange-500 px-1.5 py-0.5 rounded border border-orange-500/20">Writable</span>}
                                     {acc.isSigner && <span className="text-[10px] bg-blue-500/10 text-blue-500 px-1.5 py-0.5 rounded border border-blue-500/20">Signer</span>}
                                     {isSystemProgram && <span className="text-[10px] bg-green-500/10 text-green-500 px-1.5 py-0.5 rounded border border-green-500/20">System Program</span>}
+                                    {shouldAutoGenerateAccount(acc) && <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded border border-primary/20">Init Account</span>}
                                   </div>
                                 </label>
                                 <div className="flex gap-2">
@@ -611,7 +1126,12 @@ function ExecutorModal({
                                     </button>
                                   )}
                                 </div>
-                                {generatedKeypairs[acc.name] && (
+                                {shouldAutoGenerateAccount(acc) && (
+                                  <p className="text-xs text-muted-foreground">
+                                    This account must be new for each run. We auto-generated <span className="font-mono">{generatedKeypairs[acc.name]?.pubkey || "(pending...)"}</span> and will sign it for you.
+                                  </p>
+                                )}
+                                {!shouldAutoGenerateAccount(acc) && generatedKeypairs[acc.name] && (
                                   <span className="text-xs text-green-500 font-mono">Generated signer: {generatedKeypairs[acc.name].pubkey}</span>
                                 )}
                               </div>
@@ -619,6 +1139,65 @@ function ExecutorModal({
                           })}
                         </div>
                     </div>
+
+                      <div className="space-y-4">
+                        <h4 className="text-xs font-mono uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+                          Return Decoder
+                        </h4>
+                        <div className="space-y-3">
+                          {returnLayout.length === 0 && (
+                            <p className="text-xs text-muted-foreground">
+                              Build a layout to decode return data (numbers are little-endian; strings/bytes expect a u32 length prefix).
+                            </p>
+                          )}
+                          {returnLayout.map((field) => (
+                            <div key={field.id} className="flex flex-col gap-2 border border-border/60 rounded-md p-3 bg-background/60">
+                              <div className="flex gap-2">
+                                <input
+                                  value={field.name}
+                                  onChange={(e) => handleUpdateReturnField(field.id, { name: e.target.value })}
+                                  placeholder="Field name"
+                                  className="flex-1 bg-background border border-border rounded-md px-3 py-2 text-sm"
+                                />
+                                <select
+                                  value={field.type}
+                                  onChange={(e) => handleUpdateReturnField(field.id, { type: e.target.value as ReturnFieldType })}
+                                  className="w-32 bg-background border border-border rounded-md px-2 text-sm"
+                                >
+                                  {RETURN_FIELD_TYPE_OPTIONS.map((option) => (
+                                    <option key={option.value} value={option.value}>
+                                      {option.label}
+                                    </option>
+                                  ))}
+                                </select>
+                                <button
+                                  onClick={() => handleRemoveReturnField(field.id)}
+                                  className="px-2 py-1 text-xs bg-destructive/10 text-destructive rounded border border-destructive/30"
+                                  title="Remove field"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={handleAddReturnField}
+                            className="px-3 py-2 text-xs bg-secondary text-secondary-foreground rounded border border-border"
+                          >
+                            + Add Field
+                          </button>
+                          {returnLayout.length > 0 && (
+                            <button
+                              onClick={handleClearReturnLayout}
+                              className="px-3 py-2 text-xs bg-muted text-muted-foreground rounded border border-border"
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                      </div>
                 </div>
 
                 <div className="p-4 border-t border-border/40 bg-muted/10 space-y-3">
@@ -634,16 +1213,52 @@ function ExecutorModal({
                     </button>
                     
                     {responseStatus && (
-                        <div className="space-y-2">
-                            <div className={cn("text-xs text-center font-mono py-2 rounded", responseStatus === 200 ? "text-green-500 bg-green-500/10" : "text-red-500 bg-red-500/10")}>
-                                Status: {responseStatus}
-                            </div>
-                            {responseMessage && (
-                                <div className="text-xs text-center font-mono py-2 rounded bg-muted/50 break-all">
-                                    {responseMessage}
-                                </div>
-                            )}
+                      <div className="space-y-2">
+                        <div className={cn("text-xs text-center font-mono py-2 rounded", responseStatus === 200 ? "text-green-500 bg-green-500/10" : "text-red-500 bg-red-500/10")}>
+                          Status: {responseStatus}
                         </div>
+                        {responseMessage && (
+                          <div className="text-xs text-center font-mono py-2 rounded bg-muted/50 break-all">
+                            {responseMessage}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {returnDataInfo && (
+                      <div className="text-xs font-mono bg-secondary/20 border border-border rounded p-3 space-y-1 break-all">
+                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Return Data</div>
+                        <div>Program: {returnDataInfo.programId}</div>
+                        {returnDataInfo.encoding && <div>Encoding: {returnDataInfo.encoding}</div>}
+                        <div>Base64: {returnDataInfo.base64}</div>
+                        {returnDataInfo.hex && <div>Hex: {returnDataInfo.hex}</div>}
+                        {returnDataInfo.fields?.length ? (
+                          <div className="space-y-1 pt-2">
+                            <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Decoded Fields</div>
+                            {returnDataInfo.fields.map((field, idx) => (
+                              <div key={`${field.name}-${idx}`} className="flex justify-between gap-4">
+                                <span>{field.name} ({field.type})</span>
+                                <span className="text-right text-green-500">{field.value}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          returnDataInfo.decoded && (
+                            <div className="text-green-500">Decoded (u64): {returnDataInfo.decoded}</div>
+                          )
+                        )}
+                      </div>
+                    )}
+
+                    {txLogs.length > 0 && (
+                      <div className="text-xs font-mono bg-secondary/10 border border-border rounded p-3 space-y-2 max-h-40 overflow-y-auto">
+                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Simulation Logs</div>
+                        <ul className="space-y-1">
+                          {txLogs.map((log, idx) => (
+                            <li key={idx} className="break-words">{log}</li>
+                          ))}
+                        </ul>
+                      </div>
                     )}
                 </div>
             </motion.div>
