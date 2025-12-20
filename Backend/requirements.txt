@@ -21,6 +21,7 @@ idna==3.11
 jsonalias==0.1.1
 packaging==25.0
 pydantic==2.12.5
+pydantic-settings==2.12.0
 pydantic_core==2.41.5
 pyheck==0.1.5
 python-dotenv==1.2.1
