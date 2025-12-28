@@ -1,4 +1,4 @@
-import React, { createContext, useState, useEffect, useContext, ReactNode, useMemo } from 'react';
+import React, { createContext, useState, useEffect, useContext, ReactNode, useMemo, useRef, useCallback } from 'react';
 import { 
   ConnectionProvider, 
   WalletProvider as SolanaWalletProvider,
@@ -14,7 +14,6 @@ import { BackpackWalletAdapter } from '@solana/wallet-adapter-backpack';
 import { WalletAdapterNetwork } from '@solana/wallet-adapter-base';
 import { clusterApiUrl } from '@solana/web3.js';
 import '@solana/wallet-adapter-react-ui/styles.css';
-
 
 interface WalletContextType {
   isConnected: boolean;
@@ -38,19 +37,82 @@ function WalletContextProvider({ children }: { children: ReactNode }) {
     connected, 
     connecting,
     disconnect,
+    connect,
+    select, 
     signTransaction,
     signAllTransactions,
-    wallets // ← Add this - gives you all available wallets
+    wallets
   } = useSolanaWallet();
 
   const { connection } = useConnection();
   const [rpcUrl, setRpcUrl] = useState("");
   const { setVisible } = useWalletModal();
 
-  // Check if ANY wallet is installed
+  const isMounted = useRef(false);
+  const isConnectingRef = useRef(false); 
+
+
+  useEffect(() => {
+    if (!isMounted.current) {
+      if (!connected && wallet) {
+        console.log('🧹 Clearing persisted wallet to prevent auto-connect');
+        select(null);
+      }
+      isMounted.current = true;
+    }
+  }, [connected, wallet, select]);
+
+  //Connection logic
+  useEffect(() => {
+
+    if (wallet && !connected && !connecting && isMounted.current) {
+      
+      const readyState = wallet.adapter.readyState;
+      
+      if (readyState === 'NotDetected' || readyState === 'Unsupported') {
+        console.log(`🚫 Wallet (${wallet.adapter.name}) not installed. Redirecting...`);
+        const url = wallet.adapter.url;
+        if (url) {
+          window.open(url, '_blank');
+        }
+
+        select(null);
+        return;
+      }
+
+      if (readyState === 'Installed' || readyState === 'Loadable') {
+        
+        if (isConnectingRef.current) return;
+        
+        const timer = setTimeout(() => {
+          isConnectingRef.current = true;
+          console.log(`🔗 Wallet (${wallet.adapter.name}) ready. Connecting...`);
+          
+          connect()
+            .catch((error) => {
+              console.error('❌ Connection failed:', error);
+            })
+            .finally(() => {
+              isConnectingRef.current = false;
+            });
+        }, 100);
+
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [
+    wallet, 
+    connected, 
+    connecting, 
+    connect,
+    select,
+    wallet?.adapter?.readyState 
+  ]);
+
   const hasAnyWallet = useMemo(() => {
     return wallets.some(w => w.readyState === 'Installed');
   }, [wallets]);
+
 
   const walletAddress = useMemo(() => {
     if (!publicKey) return null;
@@ -58,17 +120,21 @@ function WalletContextProvider({ children }: { children: ReactNode }) {
     return `${address.slice(0, 4)}...${address.slice(-4)}`;
   }, [publicKey]);
 
-  const connectWallet = () => {
+  const connectWallet = useCallback(() => {
+    console.log('📱 Opening wallet modal...');
     setVisible(true);
-  };
+  }, [setVisible]);
 
-  const disconnectWallet = async () => {
+  const disconnectWallet = useCallback(async () => {
     try {
+      console.log('🔌 Disconnecting wallet...');
       await disconnect();
+
+      select(null);
     } catch (error) {
-      console.error('Error disconnecting wallet:', error);
+      console.error('❌ Disconnect error:', error);
     }
-  };
+  }, [disconnect, select]);
 
   const value: WalletContextType = {
     isConnected: connected,
@@ -90,12 +156,11 @@ function WalletContextProvider({ children }: { children: ReactNode }) {
   );
 }
 
-// Main provider component that wraps everything
+
 export function WalletProvider({ children }: { children: ReactNode }) {
   const network = WalletAdapterNetwork.Devnet;
   const endpoint = useMemo(() => clusterApiUrl(network), [network]);
 
-  // Configure supported wallets
   const wallets = useMemo(
     () => [
       new PhantomWalletAdapter(),
@@ -107,6 +172,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   return (
     <ConnectionProvider endpoint={endpoint}>
+
       <SolanaWalletProvider wallets={wallets} autoConnect={false}>
         <WalletModalProvider>
           <WalletContextProvider>{children}</WalletContextProvider>
@@ -116,7 +182,6 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   );
 }
 
-// Custom hook to use the wallet context
 export function useWallet() {
   const context = useContext(WalletContext);
   if (context === undefined) {
