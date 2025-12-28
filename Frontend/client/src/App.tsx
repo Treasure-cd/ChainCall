@@ -8,6 +8,7 @@ import InstructionBuilder from "@/pages/InstructionBuilder";
 import Simulator from "@/pages/Simulator";
 import NotFound from "@/pages/not-found";
 import WelcomeModal from "@/components/WelcomeModal";
+import { WalletProvider } from "../../client/context/WalletProvider";
 
 function Router() {
   return (
@@ -26,9 +27,11 @@ function Router() {
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
+      <WalletProvider>
       <WelcomeModal />
       <Router />
       <Toaster />
+      </WalletProvider>
     </QueryClientProvider>
   );
 }

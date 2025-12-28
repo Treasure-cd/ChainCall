@@ -2,9 +2,10 @@ import { useState, useEffect } from "react";
 import { Search, Loader2, Play, Box, Key, X, ArrowRight, Wallet, Activity } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
-import { PublicKey, Keypair } from "@solana/web3.js";
 import { sha256 } from "js-sha256";
 import { Buffer } from "buffer";
+import { useWallet } from '../../context/WalletProvider';
+import { Transaction, TransactionInstruction, PublicKey, Keypair } from '@solana/web3.js';
 
 interface IdlArg {
   name: string;
@@ -510,18 +511,18 @@ function ensureBigIntRange(
   const totalBits = BigInt(bits);
 
   if (signed) {
-    const min = -(1n << (totalBits - 1n));
-    const max = (1n << (totalBits - 1n)) - 1n;
+    const min = -(BigInt(1) << (totalBits - BigInt(1)));
+    const max = (BigInt(1) << (totalBits - BigInt(1))) - BigInt(1);
     if (value < min || value > max) {
       throw new Error(
         `[${argName}] Value ${value.toString()} is out of range for ${typeLabel}`
       );
     }
   } else {
-    if (value < 0n) {
+    if (value < BigInt(0)) {
       throw new Error(`[${argName}] ${typeLabel} must be greater than or equal to 0`);
     }
-    const max = (1n << totalBits) - 1n;
+    const max = (BigInt(1) << totalBits) - BigInt(1);
     if (value > max) {
       throw new Error(
         `[${argName}] Value ${value.toString()} is out of range for ${typeLabel}`
@@ -598,25 +599,30 @@ export default function AnchorMode() {
   const [error, setError] = useState<string | null>(null);
   const [idl, setIdl] = useState<FetchedIdl | null>(null);
   const [selectedInstruction, setSelectedInstruction] = useState<IdlInstruction | null>(null);
+  const { isConnected, signTransaction, rpcUrl, setRpcUrl } = useWallet();
 
   const isValidProgramId = (value: string) => {
     try { new PublicKey(value); return true; } catch { return false; }
   };
   const isProgramIdValid = isValidProgramId(programId);
 
-  const handleFetchIdl = async () => {
-    setIsLoading(true);
-    setIdl(null);
-    setError(null);
+ const handleFetchIdl = async () => {
+  setIsLoading(true);
+  setIdl(null);
+  setError(null);
 
-    try {
-      const rpcUrl = network === "mainnet" 
-        ? "https://api.mainnet-beta.solana.com" 
-        : "https://api.devnet.solana.com";
+  try {
+    const effectiveRpcUrl = rpcUrl || (
+      network === "mainnet" 
+        ? "https://api.mainnet-beta.solana.com"
+        : "https://api.devnet.solana.com"
+    );
 
-      const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-      const res = await fetch(`${baseUrl}/solana/idl/${programId}/methods?rpc_url=${encodeURIComponent(rpcUrl)}`);
-      
+    const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+    const res = await fetch(
+      `${baseUrl}/solana/idl/${programId}/methods?rpc_url=${encodeURIComponent(effectiveRpcUrl)}`
+    );
+    
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         throw new Error(errorData.detail || `Failed to fetch IDL (${res.status})`);
@@ -649,13 +655,20 @@ export default function AnchorMode() {
               <div className="relative">
                 <select 
                   value={network}
-                  onChange={(e) => setNetwork(e.target.value)}
-                  className="w-full bg-background/50 border border-border/50 rounded-lg py-3 px-3 font-mono text-sm focus:ring-1 focus:ring-primary/50 outline-none transition-all shadow-sm appearance-none cursor-pointer"
+                  onChange={(e) => {
+                    const newNetwork = e.target.value;
+                    setNetwork(newNetwork);
+                    const newRpc = newNetwork === "mainnet"
+                      ? "https://api.mainnet-beta.solana.com"
+                      : "https://api.devnet.solana.com";
+                    setRpcUrl(newRpc);
+                  }}
+                  className="w-full bg-background/50 border border-border/50 rounded-lg py-3 px-3 pr-8 font-mono text-sm focus:ring-2 focus:ring-primary/50 focus:border-primary/50 outline-none transition-all shadow-sm appearance-none cursor-pointer hover:bg-background/70 hover:border-border [&>option]:bg-background [&>option]:text-foreground [&>option]:border-none"
                 >
                   <option value="mainnet">Mainnet</option>
                   <option value="devnet">Devnet</option>
                 </select>
-                <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-muted-foreground">
+                <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-muted-foreground transition-colors">
                   <svg width="10" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
                   </svg>
@@ -692,14 +705,14 @@ export default function AnchorMode() {
         </div>
 
         {/* Table Section - Shows skeleton or real data */}
-        <div className="border border-border/40 rounded-xl bg-card/30 backdrop-blur-sm shadow-sm">
+        <div className="border border-border/40 rounded-xl bg-card/30 backdrop-blur-sm shadow-sm overflow-hidden">
           {error && (
             <div className="p-4 bg-destructive/10 text-destructive text-sm border-b border-destructive/20 flex items-center gap-2">
               <Activity className="h-4 w-4" />
               {error}
             </div>
           )}
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-background/30 [&::-webkit-scrollbar-thumb]:bg-primary/30 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:hover:bg-primary/50">
             <table className="w-full min-w-[640px] text-sm text-left">
               <thead className="text-xs uppercase bg-muted/30 text-muted-foreground font-medium">
                 <tr>
@@ -808,16 +821,19 @@ function ExecutorModal({
     programId, 
     network,
     onClose 
+    
 }: { 
     instruction: IdlInstruction; 
     programId: string;
     network: string;
     onClose: () => void 
+
+    
 }) {
     const [isSending, setIsSending] = useState(false);
     const [responseStatus, setResponseStatus] = useState<number | null>(null);
     const [responseMessage, setResponseMessage] = useState<string>("");
-    
+    const { rpcUrl } = useWallet();
     const [argValues, setArgValues] = useState<Record<string, string>>({});
     const [accountValues, setAccountValues] = useState<Record<string, string>>({});
     const [backendWallet, setBackendWallet] = useState<string | null>(null);
@@ -1166,10 +1182,10 @@ function ExecutorModal({
               backendWallet ||
               "";
 
-            const payload: ApiSendTxRequest = {
-                rpc_url: network === "mainnet" 
-                    ? "https://api.mainnet-beta.solana.com" 
-                    : "https://api.devnet.solana.com",
+           const payload: ApiSendTxRequest = {
+            rpc_url: rpcUrl || (network === "mainnet" 
+              ? "https://api.mainnet-beta.solana.com" 
+              : "https://api.devnet.solana.com"),
                 program_id: programId,
               accounts: accountsPayload,
                 instruction_data: instructionData,

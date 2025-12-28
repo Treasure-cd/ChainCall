@@ -8,16 +8,25 @@ import {
   Globe,
   Box,
   ChevronRight,
-  ChevronLeft
+  ChevronLeft,
+  LogOut,
+  Loader2
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-
+import { useWallet } from "../../context/WalletProvider"
+import { useWalletModal } from "@solana/wallet-adapter-react-ui";
+  
 interface LayoutProps {
   children: React.ReactNode;
 }
 
 export function Layout({ children }: LayoutProps) {
   const [location] = useLocation();
+  
+  
+  const { isConnected, walletAddress, connectWallet, disconnectWallet, isLoading, hasAnyWallet } = useWallet();
+  const { rpcUrl, setRpcUrl } = useWallet();
+
   const [sidebarWidth, setSidebarWidth] = useState(260);
   const [isDragging, setIsDragging] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -25,6 +34,8 @@ export function Layout({ children }: LayoutProps) {
   const MIN_WIDTH = 200;
   const MAX_WIDTH = 400;
   const COLLAPSE_THRESHOLD = 180;
+
+  
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -71,6 +82,9 @@ export function Layout({ children }: LayoutProps) {
     }
   };
 
+
+
+
   const navItems = [
     { href: "/", label: "Anchor Auto-Magician", icon: Zap },
     { href: "/builder", label: "Instruction Builder", icon: Binary },
@@ -115,15 +129,18 @@ export function Layout({ children }: LayoutProps) {
               <Link
                 key={item.href} 
                 href={item.href}
-                className={cn(
-                  "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 cursor-pointer",
-                  isActive 
-                    ? "bg-primary/10 text-primary shadow-sm" 
-                    : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
-                )}
               >
-                <Icon className="h-4 w-4 shrink-0" />
-                <span className="truncate">{item.label}</span>
+                <a
+                  className={cn(
+                    "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 cursor-pointer",
+                    isActive 
+                      ? "bg-primary/10 text-primary shadow-sm" 
+                      : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
+                  )}
+                >
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span className="truncate">{item.label}</span>
+                </a>
               </Link>
             );
           })}
@@ -172,6 +189,8 @@ export function Layout({ children }: LayoutProps) {
               <span className="text-xs font-medium text-muted-foreground whitespace-nowrap">RPC:</span>
               <input 
                 type="text" 
+                value={rpcUrl}
+                onChange={(e) => setRpcUrl(e.target.value)} 
                 className="bg-transparent border-none outline-none text-sm font-mono text-foreground w-full placeholder:text-muted-foreground/50"
                 placeholder="Enter RPC URL"
               />
@@ -179,10 +198,49 @@ export function Layout({ children }: LayoutProps) {
           </div>
 
           <div className="flex items-center gap-3">
-            <button className="flex items-center gap-2 bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 px-4 py-2 rounded-lg text-sm font-medium transition-all hover:shadow-md">
-              <Wallet className="h-4 w-4" />
-              Connect Wallet
-            </button>
+            {isConnected ? (
+              <div className="flex items-center gap-2">
+                 <div className="flex items-center gap-2 bg-green-500/10 text-green-600 border border-green-500/20 px-4 py-2 rounded-lg text-sm font-medium">
+                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                    <span className="font-mono">{walletAddress}</span>
+                 </div>
+                 <button 
+                   onClick={disconnectWallet}
+                   className="p-2 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
+                   title="Disconnect"
+                 >
+                   <LogOut className="h-4 w-4" />
+                 </button>
+              </div>
+            ) : (
+              <div className="relative group">
+                <button 
+                  onClick={connectWallet}
+                  disabled={isLoading}
+                  className="flex items-center gap-2 bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 px-4 py-2 rounded-lg text-sm font-medium transition-all hover:shadow-md hover:cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isLoading ? (
+                     <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                     <Wallet className="h-4 w-4" />
+                  )}
+                  <span className="hidden sm:inline">{isLoading ? "Connecting..." : "Connect Wallet"}</span>
+                </button>
+                
+                {/* Warning tooltip when no wallet is installed */}
+                {!hasAnyWallet && (
+                  <div className="absolute right-0 top-full mt-2 w-72 p-3 bg-orange-500/10 border border-orange-500/20 rounded-lg text-xs text-orange-600 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
+                    <p className="font-semibold mb-1">No wallet detected</p>
+                    <p className="mb-2">Install a Solana wallet extension to continue:</p>
+                    <ul className="space-y-1 ml-4 list-disc">
+                      <li>Phantom</li>
+                      <li>Solflare</li>
+                      <li>Backpack</li>
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </header>
 

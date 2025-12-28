@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Terminal, Activity, Loader2, AlertCircle, CheckCircle } from "lucide-react";
+import { Terminal, Activity, Loader2, AlertCircle, CheckCircle, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useWallet } from "../../context/WalletProvider";
 
 interface SimulationResult {
   logs: string[];
@@ -13,7 +14,9 @@ export default function Simulator() {
   const [txHash, setTxHash] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [result, setResult] = useState<SimulationResult | null>(null);
+  const { rpcUrl } = useWallet();
 
+  // Simple simulation - no wallet needed, just paste and simulate
   const handleSimulate = async () => {
     if (!txHash) return;
     setIsLoading(true);
@@ -24,7 +27,7 @@ export default function Simulator() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          rpc_url: "https://api.mainnet-beta.solana.com",
+          rpc_url: rpcUrl || "https://api.devnet.solana.com",
           transaction_base64: txHash,
           encoding: "base64"
         })
@@ -63,8 +66,28 @@ export default function Simulator() {
             <p className="text-muted-foreground mt-1">Dry-run transactions against the current network state.</p>
           </div>
 
+          {/* Info Banner - Wallet is optional */}
+          <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4 flex items-start gap-3">
+            <Info className="h-5 w-5 text-blue-600 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <h3 className="font-medium text-blue-600">No Wallet Required</h3>
+              <p className="text-sm text-muted-foreground mt-1">
+                Paste any base64-encoded transaction to simulate it. If you build transactions using the 
+                <a href="/" className="text-primary hover:underline mx-1">Auto-Magician</a> 
+                or 
+                <a href="/builder" className="text-primary hover:underline mx-1">Instruction Builder</a>, 
+                they can automatically send signed transactions here (wallet required for signing only).
+              </p>
+            </div>
+          </div>
+
           <div className="bg-card border border-border rounded-lg p-6 space-y-4 shadow-sm">
-            <label className="text-sm font-medium">Base64 Transaction Payload</label>
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">Base64 Transaction Payload</label>
+              <span className="text-xs text-muted-foreground">
+                Network: <span className="font-mono">{rpcUrl || "https://api.devnet.solana.com"}</span>
+              </span>
+            </div>
             <div className="flex gap-3">
               <input 
                 value={txHash}
