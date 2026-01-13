@@ -6,6 +6,7 @@ import { sha256 } from "js-sha256";
 import { Buffer } from "buffer";
 import { useWallet } from '../../context/WalletProvider';
 import { Transaction, TransactionInstruction, PublicKey, Keypair } from '@solana/web3.js';
+import useLocalStorage from "@/hooks/useLocalStorage";
 
 interface IdlArg {
   name: string;
@@ -594,7 +595,7 @@ function ensureNumberRange(
 }
 
 export default function AnchorMode() {
-  const [programId, setProgramId] = useState("");
+  const [programId, setProgramId] = useLocalStorage('programId', "");
   const [network, setNetwork] = useState("devnet");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -602,15 +603,6 @@ export default function AnchorMode() {
   const [selectedInstruction, setSelectedInstruction] = useState<IdlInstruction | null>(null);
   const { isConnected, signTransaction, rpcUrl, setRpcUrl } = useWallet();
 
-  useEffect(() => {
-  const savedProgramId = localStorage.getItem('programId');
-  if (savedProgramId) setProgramId(savedProgramId);
-  }, [])
-
-  
-  useEffect(() => {
-  localStorage.setItem('programId', programId);
-}, [programId])
 
 
 

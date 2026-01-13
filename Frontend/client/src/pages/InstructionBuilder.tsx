@@ -5,10 +5,11 @@ import { Plus, Trash2, Copy, Loader2, AlertCircle, Send, Key, X } from "lucide-r
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Transaction, VersionedTransaction, PublicKey } from '@solana/web3.js';
+import useLocalStorage from "@/hooks/useLocalStorage";
 
 type FieldType = "u8" | "u16" | "u32" | "u64" | "string" | "pubkey";
 
-interface Field {
+export interface Field {
   id: string;
   type: FieldType;
   value: string;
@@ -22,10 +23,10 @@ interface Account {
 }
 
 export default function InstructionBuilder() {
-  const [fields, setFields] = useState<Field[]>([
-    { id: "1", type: "u8", value: "1" },
-    { id: "2", type: "string", value: "Hello" }
-  ]);
+const [fields, setFields] = useLocalStorage<Field[]>('form-fields', [
+  { id: "1", type: "u8", value: "1" },
+  { id: "2", type: "string", value: "Hello" }
+]);
   
   const [bufferHex, setBufferHex] = useState<string>("");
   const [isPacking, setIsPacking] = useState(false);
