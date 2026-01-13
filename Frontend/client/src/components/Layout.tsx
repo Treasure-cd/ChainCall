@@ -153,7 +153,7 @@ export function Layout({ children }: LayoutProps) {
               <select
                 value={network}
                 onChange={(e) => switchNetwork(e.target.value as WalletAdapterNetwork)}
-                className="w-full appearance-none bg-accent/20 hover:bg-accent/40 border border-border text-foreground text-sm rounded-lg pl-9 pr-8 py-2.5 transition-colors cursor-pointer outline-none focus:ring-2 focus:ring-primary/20"
+                className="w-full appearance-none bg-accent/20 hover:bg-accent/40 border border-border text-foreground text-sm rounded-lg pl-9 pr-8 py-2.5 transition-colors cursor-pointer outline-none focus:border-primary/50"
               >
                 <option value={WalletAdapterNetwork.Devnet}>Devnet</option>
                 <option value={WalletAdapterNetwork.Mainnet}>Mainnet</option>
@@ -207,7 +207,7 @@ export function Layout({ children }: LayoutProps) {
                 type="text" 
                 value={rpcUrl}
                 onChange={(e) => setRpcUrl(e.target.value)} 
-                className="bg-transparent border-none outline-none text-sm font-mono text-foreground w-full placeholder:text-muted-foreground/50"
+                className="bg-transparent border-none outline-none text-sm font-mono text-foreground w-full placeholder:text-muted-foreground/50 focus:border-primary/50"
                 placeholder="Enter custom RPC URL"
               />
             </div>

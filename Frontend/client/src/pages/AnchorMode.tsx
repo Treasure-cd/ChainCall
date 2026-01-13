@@ -116,6 +116,8 @@ const RETURN_FIELD_TYPE_OPTIONS: { label: string; value: ReturnFieldType }[] = [
   { label: "Pubkey", value: "pubkey" },
 ];
 
+
+
 const createId = () => Math.random().toString(36).slice(2, 9);
 
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
@@ -600,7 +602,19 @@ export default function AnchorMode() {
   const [selectedInstruction, setSelectedInstruction] = useState<IdlInstruction | null>(null);
   const { isConnected, signTransaction, rpcUrl, setRpcUrl } = useWallet();
 
-  const isValidProgramId = (value: string) => {
+  useEffect(() => {
+  const savedProgramId = localStorage.getItem('programId');
+  if (savedProgramId) setProgramId(savedProgramId);
+  }, [])
+
+  
+  useEffect(() => {
+  localStorage.setItem('programId', programId);
+}, [programId])
+
+
+
+  const isValidProgramId: (value: string) => boolean = (value) => {
     try { new PublicKey(value); return true; } catch { return false; }
   };
   const isProgramIdValid = isValidProgramId(programId);
@@ -649,31 +663,7 @@ export default function AnchorMode() {
           </div>
 
           <div className="flex flex-col gap-4 sm:flex-row sm:items-end">
-            <div className="w-full sm:w-32 space-y-2">
-              <label className="text-xs font-mono uppercase tracking-wider text-muted-foreground/80">Network</label>
-              <div className="relative">
-                <select 
-                  value={network}
-                  onChange={(e) => {
-                    const newNetwork = e.target.value;
-                    setNetwork(newNetwork);
-                    const newRpc = newNetwork === "mainnet"
-                      ? "https://api.mainnet-beta.solana.com"
-                      : "https://api.devnet.solana.com";
-                    setRpcUrl(newRpc);
-                  }}
-                  className="w-full bg-background/50 border border-border/50 rounded-lg py-3 px-3 pr-8 font-mono text-sm focus:ring-2 focus:ring-primary/50 focus:border-primary/50 outline-none transition-all shadow-sm appearance-none cursor-pointer hover:bg-background/70 hover:border-border [&>option]:bg-background [&>option]:text-foreground [&>option]:border-none"
-                >
-                  <option value="mainnet">Mainnet</option>
-                  <option value="devnet">Devnet</option>
-                </select>
-                <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-muted-foreground transition-colors">
-                  <svg width="10" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                  </svg>
-                </div>
-              </div>
-            </div>
+
 
             <div className="flex-1 space-y-2 w-full">
               <label className="text-xs font-mono uppercase tracking-wider text-muted-foreground/80">Program ID</label>
