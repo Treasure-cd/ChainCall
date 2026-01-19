@@ -1,4 +1,4 @@
-import { useState } from "react";
+import React, { useState } from "react";
 import { Terminal, Activity, Loader2, AlertCircle, CheckCircle, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useWallet } from "../../context/WalletProvider";
@@ -97,7 +97,7 @@ export default function Simulator() {
               <button 
                 onClick={handleSimulate}
                 disabled={isLoading || !txHash}
-                className="bg-primary text-primary-foreground px-6 py-2 rounded-md font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                className="bg-primary text-primary-foreground px-6 py-2 rounded-md font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 cursor-pointer"
               >
                 {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Simulate"}
               </button>
@@ -152,7 +152,7 @@ export default function Simulator() {
               </div>
             ) : (
               // Empty skeleton
-              <div className="bg-black border border-border/30 rounded-lg p-4 h-[400px] space-y-2 opacity-30">
+              <div className="bg-black border border-border/30 rounded-lg p-4 h-100 space-y-2 opacity-30">
                 {[...Array(8)].map((_, i) => (
                   <div key={i} className="flex gap-3">
                     <div className="w-6 h-4 bg-muted/30 rounded" />

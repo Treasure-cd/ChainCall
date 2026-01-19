@@ -114,7 +114,7 @@ export function Layout({ children }: LayoutProps) {
           </div>
           <button
             onClick={toggleSidebar}
-            className="p-1.5 hover:bg-accent rounded-md transition-colors"
+            className="p-1.5 hover:bg-accent rounded-md transition-colors cursor-pointer"
             aria-label="Collapse sidebar"
           >
             <ChevronLeft className="h-4 w-4 text-muted-foreground" />

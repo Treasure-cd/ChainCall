@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useConnection } from '@solana/wallet-adapter-react';
 import { useWallet } from '../../context/WalletProvider';
 import { Plus, Trash2, Copy, Loader2, AlertCircle, Send, Key, X } from "lucide-react";
@@ -233,7 +233,7 @@ const [fields, setFields] = useLocalStorage<Field[]>('form-fields', [
               <span className="font-mono text-sm font-medium">Byte Layout</span>
               <button 
                 onClick={addField}
-                className="flex items-center gap-2 text-xs bg-primary/10 text-primary px-3 py-1.5 rounded-md hover:bg-primary/20 transition-colors"
+                className="flex items-center gap-2 text-xs bg-primary/10 text-primary px-3 py-1.5 rounded-md hover:bg-primary/20 transition-colors cursor-pointer"
               >
                 <Plus className="h-3 w-3" />
                 Add Field
@@ -273,7 +273,7 @@ const [fields, setFields] = useLocalStorage<Field[]>('form-fields', [
 
                     <button 
                       onClick={() => removeField(field.id)}
-                      className="col-span-1 flex items-center justify-center text-muted-foreground hover:text-destructive transition-colors"
+                      className="col-span-1 flex items-center justify-center text-muted-foreground hover:text-destructive transition-colors cursor-pointer"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
@@ -298,7 +298,7 @@ const [fields, setFields] = useLocalStorage<Field[]>('form-fields', [
                 {isPacking && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
                 <button 
                   onClick={() => navigator.clipboard.writeText(bufferHex)}
-                  className="text-muted-foreground hover:text-foreground transition-colors"
+                  className="text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
                   title="Copy Hex"
                   disabled={!bufferHex}
                 >
